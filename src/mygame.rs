@@ -1,14 +1,16 @@
+mod camera;
 mod mesh;
 mod texture;
 
 use std::{collections::HashMap, sync::Arc};
 
 use bytemuck::{Pod, Zeroable};
+use camera::{Camera, CameraController};
 use mesh::{Mesh, Vertex};
 use pollster::FutureExt;
 use texture::Texture;
 use wgpu::util::DeviceExt;
-use winit::{dpi::PhysicalSize, event::WindowEvent, window::Window};
+use winit::{dpi::PhysicalSize, event::WindowEvent, keyboard::KeyCode, window::Window};
 
 use crate::window::Game;
 
@@ -36,9 +38,11 @@ pub struct MyGame<'s> {
     prev_time: f32,
 
     depth_texture: Texture,
-    // screen_texture: Texture,
     pipelines: Vec<wgpu::RenderPipeline>,
     meshes: Vec<Mesh>,
+
+    camera: Camera,
+    camera_controller: CameraController,
 }
 
 impl MyGame<'_> {
@@ -110,7 +114,10 @@ impl MyGame<'_> {
         };
         surface.configure(&device, &surface_config);
 
-        let uniform_buffers = Self::create_uniform_buffers(&device, size);
+        let camera = Camera::new();
+        let camera_controller = CameraController::new(5.0, 0.003);
+
+        let uniform_buffers = Self::create_uniform_buffers(&device, &camera, size);
 
         let (bind_group_layouts, bind_groups) = Self::create_bind_groups(&device, &uniform_buffers);
 
@@ -119,6 +126,14 @@ impl MyGame<'_> {
 
         let depth_texture =
             Texture::create_depth_texture(&device, &surface_config, Some("depth_texture"));
+
+        window.set_cursor_visible(false);
+
+        window
+            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+            .unwrap_or_else(|_| {
+                _ = window.set_cursor_grab(winit::window::CursorGrabMode::Confined)
+            });
 
         Self {
             window,
@@ -135,13 +150,19 @@ impl MyGame<'_> {
             prev_time: 0.0,
 
             depth_texture,
-            // screen_texture,
             pipelines,
             meshes,
+
+            camera,
+            camera_controller,
         }
     }
 
-    fn create_uniform_buffers(device: &wgpu::Device, size: PhysicalSize<u32>) -> Vec<wgpu::Buffer> {
+    fn create_uniform_buffers(
+        device: &wgpu::Device,
+        camera: &Camera,
+        size: PhysicalSize<u32>,
+    ) -> Vec<wgpu::Buffer> {
         let game_info = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("game_info"),
             contents: bytemuck::cast_slice(&[GameInfo {
@@ -152,7 +173,13 @@ impl MyGame<'_> {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        return vec![game_info];
+        let camera = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera"),
+            contents: bytemuck::cast_slice(&[camera.uniform()]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        return vec![game_info, camera];
     }
 
     fn update_uniform_buffers(&mut self) {
@@ -166,13 +193,18 @@ impl MyGame<'_> {
         let game_info = GameInfo {
             resolution: [size.width, size.height],
             time,
-            delta_time
+            delta_time,
         };
 
         self.queue.write_buffer(
             &self.uniform_buffers[0],
             0,
             bytemuck::cast_slice(&[game_info]),
+        );
+        self.queue.write_buffer(
+            &self.uniform_buffers[1],
+            0,
+            bytemuck::cast_slice(&[self.camera.uniform()]),
         );
     }
 
@@ -186,25 +218,43 @@ impl MyGame<'_> {
         let game_info_bind_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("game_info_bind_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         let game_info_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("game_info_bind_group"),
             layout: &game_info_bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffers[0].as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffers[0].as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: uniform_buffers[1].as_entire_binding(),
+                },
+            ],
         });
 
         let (mut layouts, mut groups) = (
@@ -297,9 +347,7 @@ impl MyGame<'_> {
         // Used in opaque and transparent passes
         let world_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world_layout"),
-            bind_group_layouts: &[
-                &bind_group_layouts["game_info"]
-            ],
+            bind_group_layouts: &[&bind_group_layouts["game_info"]],
             push_constant_ranges: &[],
         });
 
@@ -363,8 +411,16 @@ impl MyGame<'_> {
         // self.screen_texture = Self::create_screen_texture(&self.device, &self.surface_config);
     }
 
+    fn update(&mut self, delta: f32) {
+        self.camera_controller.update(&mut self.camera, delta);
+    }
+
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let time = (std::time::Instant::now() - self.start_time).as_secs_f32();
+        let delta = time - self.prev_time;
+        self.update(delta);
         self.update_uniform_buffers();
+        self.prev_time = time;
 
         let image = self.surface.get_current_texture()?;
 
@@ -425,6 +481,7 @@ impl Game for MyGame<'_> {
         _window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
+        self.camera_controller.process_window_events(&event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => match self.render() {
@@ -435,7 +492,21 @@ impl Game for MyGame<'_> {
             WindowEvent::Resized(new_size) => {
                 self.resize(new_size);
             }
-            _ => {}
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.physical_key == KeyCode::Escape && event.state.is_pressed() {
+                    event_loop.exit();
+                }
+
+                if event.physical_key == KeyCode::KeyF && event.state.is_pressed() {
+                    self.window.set_fullscreen(match self.window.fullscreen() {
+                        Some(_) => None,
+                        None => Some(winit::window::Fullscreen::Borderless(None))
+                    });
+                }
+            }
+            _ => {
+
+            }
         }
     }
 
@@ -443,8 +514,9 @@ impl Game for MyGame<'_> {
         &mut self,
         _event_loop: &winit::event_loop::ActiveEventLoop,
         _device_id: winit::event::DeviceId,
-        _event: winit::event::DeviceEvent,
+        event: winit::event::DeviceEvent,
     ) {
+        self.camera_controller.process_device_events(&event);
     }
 
     fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
