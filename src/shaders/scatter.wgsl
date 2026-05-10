@@ -36,15 +36,17 @@ fn vs_main(
 
 // Fragment shader
 const SKY_LIGHT: vec3<f32> = vec3<f32>(0.0);
-const AABB_MIN: vec3<f32> = vec3<f32>(-40.0);
-const AABB_MAX: vec3<f32> = vec3<f32>(40.0);
+const AABB_MIN: vec3<f32> = vec3<f32>(-80.0);
+const AABB_MAX: vec3<f32> = vec3<f32>(80.0);
 const SUN_DIRECTION: vec3<f32> = vec3<f32>(0.5773502691896258, 0.5773502691896258, 0.5773502691896258);
+const SUN_LIGHT: vec3<f32> = vec3<f32>(20.0);
 const PI: f32 = 3.141592653589;
-const WAVELENGTHS: vec3<f32> = vec3<f32>(0.7, 0.9, 0.80);
+const WAVELENGTHS: vec3<f32> = vec3<f32>(0.5, 0.7, 0.76);
+const PLANET_RADIUS: f32 = 28.0;
 
-fn aabb_ray(min: vec3<f32>, max: vec3<f32>, ro: vec3<f32>, rd: vec3<f32>) -> vec2<f32> {
-    let tMin = (min - ro) / rd;
-    let tMax = (max - ro) / rd;
+fn aabb_ray(aabb_min: vec3<f32>, aabb_max: vec3<f32>, ro: vec3<f32>, rd: vec3<f32>) -> vec2<f32> {
+    let tMin = (aabb_min - ro) / rd;
+    let tMax = (aabb_max - ro) / rd;
 
     let t1 = min(tMin, tMax);
     let t2 = max(tMin, tMax);
@@ -59,26 +61,50 @@ fn aabb_ray(min: vec3<f32>, max: vec3<f32>, ro: vec3<f32>, rd: vec3<f32>) -> vec
     return vec2(tNear, tFar);
 }
 
-fn sample_point(p: vec3<f32>) -> f32 {
-    let ln = length(p);
-    if(ln < 18.0) {
-        return 0.0;
+fn circle_ray(ro: vec3<f32>, rd: vec3<f32>, circle: vec4<f32>) -> vec2<f32> {
+    let l = circle.xyz - ro;
+    let t_ca = dot(l, rd);
+    let d2 = dot(l, l) - t_ca * t_ca;
+    let r2 = circle.w * circle.w;
+
+    if(d2 > r2) {
+        return vec2(-1.0, -1.0);
     }
 
-    let h = length(p) / 20.0;
+    let t_h = sqrt(r2 - d2);
 
-    return exp(-h / 0.35);
+    let t1 = t_ca - t_h;
+    let t2 = t_ca + t_h;
+
+    if(t1 >= 0.0) {
+        return vec2(t1, t2);
+    } else if(t2 >= 0.0) {
+        return vec2(t2, t1);
+    } else {
+        return vec2(-1.0, -1.0);
+    }
+}
+
+fn sample_point(p: vec3<f32>) -> f32 {
+    let ln = length(p);
+    if(ln < PLANET_RADIUS) {
+        return 10.0;
+    }
+
+    let h = ln / 10.0;
+
+    return exp(-h / 0.28);
 }
 
 // Compute Rayleigh scattering coefficient
 fn rayleighScattering(wavelength: vec3<f32>) -> vec3<f32> {
-    const rayleigh_intensity: f32 = 0.1; // Adjust for intensity scaling
+    const rayleigh_intensity: f32 = 1.0; // Adjust for intensity scaling
     return rayleigh_intensity / pow(wavelength, vec3(4.0)); // 1 / λ^4
 }
 
 // Compute Mie scattering coefficient
 fn mieScattering(wavelength: vec3<f32>) -> vec3<f32> {
-    const mie_intensity: f32 = 0.001; // Adjust for intensity scaling
+    const mie_intensity: f32 = 10.0; // Adjust for intensity scaling
     return mie_intensity / wavelength; // 1 / λ (approximation)
 }
 
@@ -96,9 +122,9 @@ fn miePhase(cos_theta: f32, g: f32) -> f32 {
 }
 
 fn ray_sky(rd: vec3<f32>) -> vec3<f32> {
-    let sun = pow(clamp(dot(rd, SUN_DIRECTION), 0.0, 1.0), 128.0);
+    let sun = pow(clamp(dot(rd, SUN_DIRECTION), 0.0, 1.0), 256.0);
 
-    return mix(SKY_LIGHT, vec3<f32>(1.0), sun);
+    return mix(SKY_LIGHT, SUN_LIGHT, sun);
 }
 
 fn out_scattering(p0: vec3<f32>, p1: vec3<f32>) -> vec3<f32> {
@@ -127,7 +153,7 @@ fn out_scattering(p0: vec3<f32>, p1: vec3<f32>) -> vec3<f32> {
         steps++;
     }
 
-    return 4.0 * PI * rayleigh * accumulated_scattering;
+    return 4.0 * PI * mie * rayleigh * accumulated_scattering;
 }
 
 fn in_scattering(p0: vec3<f32>, p1: vec3<f32>) -> vec3<f32> {
@@ -155,7 +181,7 @@ fn in_scattering(p0: vec3<f32>, p1: vec3<f32>) -> vec3<f32> {
         let sun_dir_intersection = aabb_ray(AABB_MIN, AABB_MAX, p, SUN_DIRECTION);
         let cam_dir_intersection = aabb_ray(AABB_MIN, AABB_MAX, p, -d);
         let out_scatter_sun = out_scattering(p, p + SUN_DIRECTION * (sun_dir_intersection.y + 0.1));
-        let out_scatter_camera = out_scattering(p, p + (-d * cam_dir_intersection.y));
+        let out_scatter_camera = out_scattering(p, p + -d * (cam_dir_intersection.y - 0.1));
 
         let sun_camera_scatter = exp(-out_scatter_sun);
 
@@ -165,8 +191,8 @@ fn in_scattering(p0: vec3<f32>, p1: vec3<f32>) -> vec3<f32> {
         steps++;
     }
 
-    // Is(l) * K(l) * F(theta, g)
-    return vec3(1.0) * rayleigh * accumulated_scattering;
+    // Is(l) * K(l) * F(theta, g) * Int(p0, p1) { density * exp(-sun - camera) }
+    return vec3(1.0) * mie * rayleigh * rayleigh_phase * accumulated_scattering;
 }
 
 fn scatter(p0: vec3<f32>, p1: vec3<f32>) -> vec3<f32> {
@@ -175,7 +201,7 @@ fn scatter(p0: vec3<f32>, p1: vec3<f32>) -> vec3<f32> {
 
 fn blend_with_sky(rd: vec3<f32>, scattered: vec3<f32>) -> vec3<f32> {
     // Example: Use an exponential decay based on scattering intensity
-    let scattering_factor = 1.0 - exp(-length(scattered));
+    let scattering_factor = 1.0 / (1.0 + exp(-length(scattered)));
     return mix(ray_sky(rd), scattered, scattering_factor);
 }
 
@@ -194,7 +220,7 @@ fn calculate_pixel(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
 
     let p1 = ro + rd * intersection.y;
 
-    let scattered = scatter(p0, p1);
+    let scattered = scatter(p0, p1) * 10.0;
     return blend_with_sky(rd, scattered);
 }
 

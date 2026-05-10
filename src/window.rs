@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use winit::{
-    application::ApplicationHandler,
-    event::WindowEvent,
-    window::{Window, WindowAttributes},
+    application::ApplicationHandler, dpi::PhysicalSize, event::WindowEvent, window::{Window, WindowAttributes}
 };
 
 pub trait Game {
@@ -52,7 +50,9 @@ impl<T: Game> ApplicationHandler for GameWindow<T> {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         self.window = Some(Arc::new(
             event_loop
-                .create_window(WindowAttributes::default())
+                .create_window(WindowAttributes::default()
+                    .with_inner_size(PhysicalSize::new(1280, 720))
+                )
                 .unwrap(),
         ));
 

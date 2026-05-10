@@ -8,6 +8,7 @@ use winit::{
 pub struct Camera {
     eye: Point3<f32>,
     direction: Vector3<f32>,
+    up: Vector3<f32>,
 }
 
 #[allow(dead_code)]
@@ -16,11 +17,12 @@ impl Camera {
         Self {
             eye: Point3::new(0.0, 0.0, 0.0),
             direction: Vector3::unit_z(),
+            up: Vector3::unit_y(),
         }
     }
 
     pub fn up(&self) -> Vector3<f32> {
-        Vector3::unit_y()
+        self.up
     }
 
     pub fn right(&self) -> Vector3<f32> {
@@ -83,6 +85,7 @@ pub struct CameraController {
     camera_motion: (f32, f32),
     horizontal: Axis,
     vertical: Axis,
+    qe_axis: Axis,
 }
 
 impl CameraController {
@@ -93,6 +96,7 @@ impl CameraController {
             camera_motion: (0.0, 0.0),
             horizontal: Axis::new(KeyCode::KeyA, KeyCode::KeyD),
             vertical: Axis::new(KeyCode::KeyS, KeyCode::KeyW),
+            qe_axis: Axis::new(KeyCode::KeyQ, KeyCode::KeyE),
         }
     }
 
@@ -101,6 +105,7 @@ impl CameraController {
             WindowEvent::KeyboardInput { ref event, .. } => {
                 self.horizontal.process(event);
                 self.vertical.process(event);
+                self.qe_axis.process(event);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 match delta {
@@ -125,16 +130,28 @@ impl CameraController {
     }
 
     pub fn update(&mut self, camera: &mut Camera, delta: f32) {
-        let roty = Matrix3::from_angle_y(cgmath::Rad(self.camera_motion.0 * self.sensitivity));
-        let rotx = Matrix3::from_angle_x(cgmath::Rad(self.camera_motion.1 * self.sensitivity));
+        let roty = Matrix3::from_axis_angle(
+            camera.up,
+            cgmath::Rad(self.camera_motion.0 * self.sensitivity)
+        );
+        let rotx = Matrix3::from_axis_angle(
+            camera.right(),
+            cgmath::Rad(self.camera_motion.1 * self.sensitivity)
+        );
 
         camera.direction = roty * rotx * Vector3::unit_z();
 
-        let movement = (self.horizontal.get() * camera.right()
-            + self.vertical.get() * camera.direction)
-            .normalize()
+        let movement = (
+                self.horizontal.get() * camera.right()
+                + self.vertical.get() * camera.direction
+            ).normalize()
             * self.speed
             * delta;
+        
+        // camera.up = Matrix3::from_axis_angle(
+        //     camera.direction,
+        //     cgmath::Rad(-self.qe_axis.get() * delta)
+        // ) * camera.up;
 
         if self.horizontal.get() != 0.0 || self.vertical.get() != 0.0 {
             camera.eye += movement;

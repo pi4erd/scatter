@@ -52,7 +52,9 @@ impl MyGame<'_> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12,
             flags: wgpu::InstanceFlags::VALIDATION,
-            ..Default::default()
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
         });
 
         let surface = instance
@@ -69,15 +71,14 @@ impl MyGame<'_> {
             .expect("Failed to create an adapter");
 
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::Performance,
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            })
             .block_on()
             .expect("Failed to create device");
 
@@ -296,7 +297,7 @@ impl MyGame<'_> {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -347,8 +348,8 @@ impl MyGame<'_> {
         // Used in opaque and transparent passes
         let world_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world_layout"),
-            bind_group_layouts: &[&bind_group_layouts["game_info"]],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layouts["game_info"])],
+            immediate_size: 0,
         });
 
         let scatter_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -386,12 +387,12 @@ impl MyGame<'_> {
             }),
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Texture::DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -415,14 +416,31 @@ impl MyGame<'_> {
         self.camera_controller.update(&mut self.camera, delta);
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(&mut self) {
         let time = (std::time::Instant::now() - self.start_time).as_secs_f32();
         let delta = time - self.prev_time;
         self.update(delta);
         self.update_uniform_buffers();
         self.prev_time = time;
 
-        let image = self.surface.get_current_texture()?;
+        let image = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(img)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(img) => img,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                self.resize(PhysicalSize::new(
+                    self.surface_config.width,
+                    self.surface_config.height,
+                ));
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                return;
+            }
+            e => {
+                log::error!("Surface error: {e:?}");
+                return;
+            }
+        };
 
         let view = image
             .texture
@@ -442,6 +460,7 @@ impl MyGame<'_> {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_texture.view,
@@ -453,6 +472,7 @@ impl MyGame<'_> {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             opaque_pass.set_pipeline(&self.pipelines[0]);
@@ -465,8 +485,6 @@ impl MyGame<'_> {
         self.queue.submit(std::iter::once(encoder.finish()));
 
         image.present();
-
-        Ok(())
     }
 }
 
@@ -484,11 +502,7 @@ impl Game for MyGame<'_> {
         self.camera_controller.process_window_events(&event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => match self.render() {
-                Ok(()) => {}
-                Err(wgpu::SurfaceError::Lost) => todo!("Surface error"),
-                Err(e) => panic!("Error while trying to render: {e}"),
-            },
+            WindowEvent::RedrawRequested => self.render(),
             WindowEvent::Resized(new_size) => {
                 self.resize(new_size);
             }
@@ -500,13 +514,11 @@ impl Game for MyGame<'_> {
                 if event.physical_key == KeyCode::KeyF && event.state.is_pressed() {
                     self.window.set_fullscreen(match self.window.fullscreen() {
                         Some(_) => None,
-                        None => Some(winit::window::Fullscreen::Borderless(None))
+                        None => Some(winit::window::Fullscreen::Borderless(None)),
                     });
                 }
             }
-            _ => {
-
-            }
+            _ => {}
         }
     }
 
